@@ -284,17 +284,36 @@ class CLNRestWallet(LightningBackend):
 
     async def paid_invoices_stream(self) -> AsyncGenerator[str, None]:
         # call listinvoices to determine the last pay_index
-        r = await self.client.post("/v1/listinvoices")
+
+        r = await self.client.post("/v1/wait",
+            data={
+                "subsystem": "invoices", 
+                "indexname": "updated", 
+                "nextvalue": 0
+            }
+        )
+
         r.raise_for_status()
         data = r.json()
         if r.is_error or "message" in data:
             raise Exception("error in cln response")
 
-        self.last_pay_index = next(
-            (invoice["pay_index"] for invoice in reversed(data["invoices"])
-             if invoice["status"] == "paid"),
-            0
+        r = await self.client.post("/v1/listinvoices",
+            data={
+                "index": "updated", 
+                "start": max(data["updated"] - 50, 0)
+            }
         )
+
+        r.raise_for_status()
+        data = r.json()
+        if r.is_error or "message" in data:
+            raise Exception("error in cln response")
+
+        for invoice in reversed(data["invoices"]):
+            if invoice["status"] == "paid":
+                self.last_pay_index = invoice["pay_index"]
+                break 
 
         while True:
             try:

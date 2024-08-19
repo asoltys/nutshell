@@ -215,6 +215,8 @@ class CLNRestFundingSource(MintSettings):
     mint_clnrest_cert: Optional[str] = Field(default=None)
     mint_clnrest_rune: Optional[str] = Field(default=None)
     mint_clnrest_enable_mpp: bool = Field(default=False)
+    mint_clnrest_coinos_url: Optional[str] = Field(default=False)
+    mint_clnrest_coinos_jwt: Optional[str] = Field(default=False)
 
 
 class CoreLightningRestFundingSource(MintSettings):

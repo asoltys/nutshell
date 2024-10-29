@@ -127,6 +127,7 @@ class CLNRestWallet(LightningBackend):
             "amount_msat": amount.to(Unit.msat, round="up").amount,
             "description": memo,
             "label": label,
+            "expiry": 3600
         }
         if description_hash and not unhashed_description:
             raise Unsupported(

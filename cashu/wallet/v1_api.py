@@ -7,6 +7,9 @@ import bolt11
 import httpx
 from httpx import Response
 from loguru import logger
+from pydantic import ValidationError
+
+from cashu.wallet.crud import get_bolt11_melt_quote
 
 from ..core.base import (
     BlindedMessage,
@@ -44,9 +47,6 @@ from ..core.models import (
 )
 from ..core.settings import settings
 from ..tor.tor import TorProxy
-from .crud import (
-    get_lightning_invoice,
-)
 from .wallet_deprecated import LedgerAPIDeprecated
 
 
@@ -170,10 +170,8 @@ class LedgerAPI(LedgerAPIDeprecated):
         keys_dict: dict = resp.json()
         assert len(keys_dict), Exception("did not receive any keys")
         keys = KeysResponse.parse_obj(keys_dict)
-        logger.debug(
-            f"Received {len(keys.keysets)} keysets from mint:"
-            f" {' '.join([k.id + f' ({k.unit})' for k in keys.keysets])}."
-        )
+        keysets_str = " ".join([f"{k.id} ({k.unit})" for k in keys.keysets])
+        logger.debug(f"Received {len(keys.keysets)} keysets from mint: {keysets_str}.")
         ret = [
             WalletKeyset(
                 id=keyset.id,
@@ -316,6 +314,24 @@ class LedgerAPI(LedgerAPIDeprecated):
 
     @async_set_httpx_client
     @async_ensure_mint_loaded
+    async def get_mint_quote(self, quote: str) -> PostMintQuoteResponse:
+        """Returns an existing mint quote from the server.
+
+        Args:
+            quote (str): Quote ID
+
+        Returns:
+            PostMintQuoteResponse: Mint Quote Response
+        """
+        resp = await self.httpx.get(
+            join(self.url, f"/v1/mint/quote/bolt11/{quote}"),
+        )
+        self.raise_on_error_request(resp)
+        return_dict = resp.json()
+        return PostMintQuoteResponse.parse_obj(return_dict)
+
+    @async_set_httpx_client
+    @async_ensure_mint_loaded
     async def mint(
         self, outputs: List[BlindedMessage], quote: str
     ) -> List[BlindedSignature]:
@@ -388,7 +404,7 @@ class LedgerAPI(LedgerAPIDeprecated):
             ret: CheckFeesResponse_deprecated = await self.check_fees_deprecated(
                 payment_request
             )
-            quote_id = "deprecated_" + str(uuid.uuid4())
+            quote_id = f"deprecated_{uuid.uuid4()}"
             return PostMeltQuoteResponse(
                 quote=quote_id,
                 amount=amount or invoice_obj.amount_msat // 1000,
@@ -398,6 +414,24 @@ class LedgerAPI(LedgerAPIDeprecated):
                 expiry=invoice_obj.expiry,
             )
         # END backwards compatibility < 0.15.0
+        self.raise_on_error_request(resp)
+        return_dict = resp.json()
+        return PostMeltQuoteResponse.parse_obj(return_dict)
+
+    @async_set_httpx_client
+    @async_ensure_mint_loaded
+    async def get_melt_quote(self, quote: str) -> PostMeltQuoteResponse:
+        """Returns an existing melt quote from the server.
+
+        Args:
+            quote (str): Quote ID
+
+        Returns:
+            PostMeltQuoteResponse: Melt Quote Response
+        """
+        resp = await self.httpx.get(
+            join(self.url, f"/v1/melt/quote/bolt11/{quote}"),
+        )
         self.raise_on_error_request(resp)
         return_dict = resp.json()
         return PostMeltQuoteResponse.parse_obj(return_dict)
@@ -433,14 +467,26 @@ class LedgerAPI(LedgerAPIDeprecated):
             json=payload.dict(include=_meltrequest_include_fields(proofs, outputs)),  # type: ignore
             timeout=None,
         )
-        # BEGIN backwards compatibility < 0.15.0
-        # assume the mint has not upgraded yet if we get a 404
-        if resp.status_code == 404:
-            invoice = await get_lightning_invoice(id=quote, db=self.db)
-            assert invoice, f"no invoice found for id {quote}"
-            ret: PostMeltResponse_deprecated = await self.melt_deprecated(
-                proofs=proofs, outputs=outputs, invoice=invoice.bolt11
-            )
+        try:
+            self.raise_on_error_request(resp)
+            return_dict = resp.json()
+            return PostMeltQuoteResponse.parse_obj(return_dict)
+        except Exception as e:
+            # BEGIN backwards compatibility < 0.15.0
+            # assume the mint has not upgraded yet if we get a 404
+            if resp.status_code == 404:
+                melt_quote = await get_bolt11_melt_quote(quote=quote, db=self.db)
+                assert melt_quote, f"no melt_quote found for id {quote}"
+                ret: PostMeltResponse_deprecated = await self.melt_deprecated(
+                    proofs=proofs, outputs=outputs, invoice=melt_quote.request
+                )
+            elif isinstance(e, ValidationError):
+                # BEGIN backwards compatibility < 0.16.0
+                # before 0.16.0, mints return PostMeltResponse_deprecated
+                ret = PostMeltResponse_deprecated.parse_obj(return_dict)
+                # END backwards compatibility < 0.16.0
+            else:
+                raise e
             return PostMeltQuoteResponse(
                 quote=quote,
                 amount=0,
@@ -455,10 +501,7 @@ class LedgerAPI(LedgerAPIDeprecated):
                 change=ret.change,
                 expiry=None,
             )
-        # END backwards compatibility < 0.15.0
-        self.raise_on_error_request(resp)
-        return_dict = resp.json()
-        return PostMeltQuoteResponse.parse_obj(return_dict)
+            # END backwards compatibility < 0.15.0
 
     @async_set_httpx_client
     @async_ensure_mint_loaded
@@ -530,9 +573,28 @@ class LedgerAPI(LedgerAPIDeprecated):
                     states.append(ProofState(Y=p.Y, state=ProofSpentState.pending))
                 else:
                     states.append(ProofState(Y=p.Y, state=ProofSpentState.spent))
-            ret = PostCheckStateResponse(states=states)
-            return ret
+            return PostCheckStateResponse(states=states)
         # END backwards compatibility < 0.15.0
+
+        # BEGIN backwards compatibility < 0.16.0
+        # payload has "secrets" instead of "Ys"
+        if resp.status_code == 422:
+            logger.warning(
+                "Received HTTP Error 422. Attempting state check with < 0.16.0 compatibility."
+            )
+            payload_secrets = {"secrets": [p.secret for p in proofs]}
+            resp_secrets = await self.httpx.post(
+                join(self.url, "/v1/checkstate"),
+                json=payload_secrets,
+            )
+            self.raise_on_error(resp_secrets)
+            states = [
+                ProofState(Y=p.Y, state=ProofSpentState(s["state"]))
+                for p, s in zip(proofs, resp_secrets.json()["states"])
+            ]
+            return PostCheckStateResponse(states=states)
+        # END backwards compatibility < 0.16.0
+
         self.raise_on_error_request(resp)
         return PostCheckStateResponse.parse_obj(resp.json())
 

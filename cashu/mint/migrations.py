@@ -1,7 +1,7 @@
 import copy
 from typing import Dict, List
 
-from ..core.base import MintKeyset, Proof
+from ..core.base import MeltQuoteState, MintKeyset, MintQuoteState, Proof
 from ..core.crypto.keys import derive_keyset_id, derive_keyset_id_deprecated
 from ..core.db import Connection, Database
 from ..core.settings import settings
@@ -288,6 +288,7 @@ async def m011_add_quote_tables(db: Database):
                     checking_id TEXT NOT NULL,
                     unit TEXT NOT NULL,
                     amount {db.big_int} NOT NULL,
+                    paid BOOL NOT NULL,
                     issued BOOL NOT NULL,
                     created_time TIMESTAMP,
                     paid_time TIMESTAMP,
@@ -296,7 +297,6 @@ async def m011_add_quote_tables(db: Database):
 
                 );
             """
-            # NOTE: We remove the paid BOOL NOT NULL column
         )
 
         await conn.execute(
@@ -309,6 +309,7 @@ async def m011_add_quote_tables(db: Database):
                     unit TEXT NOT NULL,
                     amount {db.big_int} NOT NULL,
                     fee_reserve {db.big_int},
+                    paid BOOL NOT NULL,
                     created_time TIMESTAMP,
                     paid_time TIMESTAMP,
                     fee_paid {db.big_int},
@@ -318,14 +319,13 @@ async def m011_add_quote_tables(db: Database):
 
                 );
             """
-            # NOTE: We remove the paid BOOL NOT NULL column
         )
 
         await conn.execute(
             f"INSERT INTO {db.table_with_schema('mint_quotes')} (quote, method,"
-            " request, checking_id, unit, amount, issued, created_time,"
+            " request, checking_id, unit, amount, paid, issued, created_time,"
             " paid_time) SELECT id, 'bolt11', bolt11, COALESCE(payment_hash, 'None'),"
-            f" 'sat', amount, issued, COALESCE(created, '{db.timestamp_now_str()}'),"
+            f" 'sat', amount, False, issued, COALESCE(created, '{db.timestamp_now_str()}'),"
             f" NULL FROM {db.table_with_schema('invoices')} "
         )
 
@@ -826,3 +826,15 @@ async def m021_add_change_and_expiry_to_melt_quotes(db: Database):
         await conn.execute(
             f"ALTER TABLE {db.table_with_schema('melt_quotes')} ADD COLUMN expiry TIMESTAMP"
         )
+
+
+async def m022_quote_set_states_to_values(db: Database):
+    async with db.connect() as conn:
+        for melt_quote_states in MeltQuoteState:
+            await conn.execute(
+                f"UPDATE {db.table_with_schema('melt_quotes')} SET state = '{melt_quote_states.value}' WHERE state = '{melt_quote_states.name}'"
+            )
+        for mint_quote_states in MintQuoteState:
+            await conn.execute(
+                f"UPDATE {db.table_with_schema('mint_quotes')} SET state = '{mint_quote_states.value}' WHERE state = '{mint_quote_states.name}'"
+            )

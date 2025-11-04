@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import random
+import requests
 from typing import AsyncGenerator, Dict, Optional
 
 import httpx
@@ -162,6 +163,27 @@ class CLNRestWallet(LightningBackend):
         data = r.json()
         assert "payment_hash" in data
         assert "bolt11" in data
+
+        json= {
+            "invoice": {
+                "bolt11": data["bolt11"],
+                "type": "lightning"
+            },
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + settings.mint_clnrest_coinos_jwt
+        }
+
+        url = settings.mint_clnrest_coinos_url + "/invoice"
+        response = requests.post(url, json=json, headers=headers)
+
+        if response.status_code == 200:
+            logger.info(f"Created coinos invoice");
+        else:
+            logger.error(f"Failed to create coinos invoice - Status Code: {response.status_code}, Response: {response.text}");
+
         return InvoiceResponse(
             ok=True,
             checking_id=data["payment_hash"],
@@ -224,6 +246,28 @@ class CLNRestWallet(LightningBackend):
         checking_id = data["payment_hash"]
         preimage = data["payment_preimage"]
         fee_msat = data["amount_sent_msat"] - data["amount_msat"]
+
+        amount = data["amount_sent_msat"]
+        logger.info(f"AMOUNT {amount}");
+
+        json= {
+            "bolt11": quote.request,
+            "amount": data["amount_sent_msat"],
+            "preimage": data["payment_preimage"]
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + settings.mint_clnrest_coinos_jwt
+        }
+
+        url = settings.mint_clnrest_coinos_url + "/melt"
+        response = requests.post(url, json=json, headers=headers)
+
+        if response.status_code == 200:
+            logger.info(f"Melted coinos cash");
+        else:
+            logger.error(f"Failed to melt in coinos - Status Code: {response.status_code}, Response: {response.text}");
 
         return PaymentResponse(
             result=PAYMENT_RESULT_MAP[data["status"]],
